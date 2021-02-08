@@ -1,0 +1,12 @@
+@Keyframes rotateApp {
+    0% {
+      transform: rotate(360deg);
+    }
+    100% {
+      transform: rotate(1deg);
+    }
+  }
+  
+  html {
+    animation: rotateApp 10s linear infinite;
+  }
