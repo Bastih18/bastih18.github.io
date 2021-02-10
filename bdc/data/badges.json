@@ -1,3 +1,8 @@
 {
-    "273797150880563201": ["https://cdn.discordapp.com/emojis/521001261043286046.gif?v=1"]
+    "273797150880563201": [
+        {
+            "url": "https://cdn.discordapp.com/emojis/521001261043286046.gif?v=1",
+            "text": "Hello world!"
+        }
+    ]
 }
