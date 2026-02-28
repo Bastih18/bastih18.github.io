@@ -254,12 +254,16 @@ else
 
   TEMP_CERT=$(mktemp /tmp/stepca-root-XXXXXX.crt)
 
-  # Always use the insecure grab — we verify via fingerprint prompt, not SSL chain
-  openssl s_client \
-    -connect "${CA_HOST}:${CA_PORT}" \
-    -showcerts 2>/dev/null < /dev/null \
-  | awk '/-----BEGIN CERTIFICATE-----/{p=1} p; /-----END CERTIFICATE-----/{p=0; exit}' \
-  > "$TEMP_CERT" || true
+  # Always use an insecure fetch here; authenticity is verified by fingerprint prompt
+  # Ask step-ca endpoint for PEM root (works with default step-ca path)
+  CURL_URL="${CA_URL%/}/roots.pem"
+  curl -fsS -k --max-time 10 "$CURL_URL" -o "$TEMP_CERT" || true
+
+  # Keep only the first certificate in case multiple PEM certs are returned
+  if [[ -s "$TEMP_CERT" ]]; then
+    awk '/-----BEGIN CERTIFICATE-----/{p=1} p{print} /-----END CERTIFICATE-----/{exit}' "$TEMP_CERT" > "${TEMP_CERT}.one" || true
+    mv "${TEMP_CERT}.one" "$TEMP_CERT"
+  fi
 
   if [[ ! -s "$TEMP_CERT" ]]; then
     rm -f "$TEMP_CERT"
