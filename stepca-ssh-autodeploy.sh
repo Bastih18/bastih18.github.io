@@ -49,6 +49,33 @@ read_secret() {
   printf -v "$var_name" '%s' "$secret"
 }
 
+detect_ssh_service() {
+  # Returns the correct systemd service name for SSH on this host
+  for svc in ssh sshd ssh.service sshd.service; do
+    if systemctl list-units --type=service --all 2>/dev/null | grep -q "^[[:space:]]*${svc%.*}\.service"; then
+      echo "${svc%.*}"
+      return
+    fi
+  done
+  # Fallback: try loading each directly
+  if systemctl cat sshd.service &>/dev/null; then
+    echo "sshd"
+  elif systemctl cat ssh.service &>/dev/null; then
+    echo "ssh"
+  else
+    echo "sshd"  # last resort default
+  fi
+}
+
+restart_ssh() {
+  local svc
+  svc=$(detect_ssh_service)
+  info "Restarting SSH service (${svc})..."
+  systemctl restart "$svc" \
+    && success "SSH service restarted (${svc})." \
+    || error "Failed to restart ${svc}."
+}
+
 require_root() {
   [[ $EUID -eq 0 ]] || error "This script must be run as root (or via sudo)."
 }
@@ -328,8 +355,7 @@ else
   if ask_yn "Add it now?"; then
     echo "$CERT_LINE" >> "$SSHD_CONF"
     success "Added HostCertificate directive."
-    info "Restarting sshd..."
-    systemctl restart sshd && success "sshd restarted." || error "Failed to restart sshd."
+    restart_ssh
   else
     warn "Skipped. Remember to add it manually before SSH host cert auth will work."
   fi
@@ -341,7 +367,8 @@ echo
 
 echo -e "${CYAN}━━━ Step 5: Auto-Renewal Cron Job ━━━━━━━━━━━━━━${NC}"
 
-CRON_LINE="0 0 * * * step ssh renew --force /etc/ssh/ssh_host_ecdsa_key-cert.pub /etc/ssh/ssh_host_ecdsa_key && systemctl restart sshd"
+SSH_SVC=$(detect_ssh_service)
+CRON_LINE="0 0 * * * step ssh renew --force /etc/ssh/ssh_host_ecdsa_key-cert.pub /etc/ssh/ssh_host_ecdsa_key && systemctl restart ${SSH_SVC}"
 
 # Check root's crontab for existing renewal entry
 if crontab -l 2>/dev/null | grep -qF "ssh_host_ecdsa_key-cert.pub"; then
