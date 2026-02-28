@@ -16,7 +16,7 @@ ask_yn() {
   # ask_yn "Question" -> returns 0 for yes, 1 for no
   local prompt="$1"
   while true; do
-    read -rp "$(echo -e "${YELLOW}${prompt} [y/N]:${NC} ")" yn
+    read -rp "$(echo -e "${YELLOW}${prompt} [y/N]:${NC} ")" yn </dev/tty
     case "${yn,,}" in
       y|yes) return 0 ;;
       n|no|"") return 1 ;;
@@ -32,7 +32,7 @@ read_secret() {
   local secret=""
   local char
   echo -ne "${YELLOW}${prompt}:${NC} "
-  while IFS= read -r -s -n1 char; do
+  while IFS= read -r -s -n1 char </dev/tty; do
     if [[ -z "$char" ]]; then
       break
     elif [[ "$char" == $'\x7f' ]]; then
@@ -125,7 +125,7 @@ require_root
 require_step
 
 # CA URL
-read -rp "$(echo -e "${YELLOW}CA URL${NC} [https://step-ca.local:9000]: ")" CA_URL
+read -rp "$(echo -e "${YELLOW}CA URL${NC} [https://step-ca.local:9000]: ")" CA_URL </dev/tty
 CA_URL="${CA_URL:-https://step-ca.local:9000}"
 
 # Check if step is already bootstrapped by looking for an existing CA config
@@ -142,14 +142,14 @@ if [[ -f "$STEP_CONFIG" ]] && grep -q '"ca-url"' "$STEP_CONFIG" 2>/dev/null; the
 else
   # Fingerprint only needed if not yet bootstrapped
   while true; do
-    read -rp "$(echo -e "${YELLOW}CA Fingerprint${NC}: ")" CA_FINGERPRINT
+    read -rp "$(echo -e "${YELLOW}CA Fingerprint${NC}: ")" CA_FINGERPRINT </dev/tty
     [[ -n "$CA_FINGERPRINT" ]] && break
     warn "Fingerprint cannot be empty."
   done
 fi
 
 # Provisioner
-read -rp "$(echo -e "${YELLOW}Provisioner name${NC} [admin]: ")" PROVISIONER
+read -rp "$(echo -e "${YELLOW}Provisioner name${NC} [admin]: ")" PROVISIONER </dev/tty
 PROVISIONER="${PROVISIONER:-admin}"
 
 # Provisioner password (optional, shown as *)
@@ -169,7 +169,7 @@ echo "  • $IP  (primary IP)"
 echo
 
 # Custom principals
-read -rp "$(echo -e "${YELLOW}Additional principals${NC} (comma-separated, or blank for none): ")" CUSTOM_PRINCIPALS_RAW
+read -rp "$(echo -e "${YELLOW}Additional principals${NC} (comma-separated, or blank for none): ")" CUSTOM_PRINCIPALS_RAW </dev/tty
 
 EXTRA_PRINCIPAL_FLAGS=""
 if [[ -n "$CUSTOM_PRINCIPALS_RAW" ]]; then
