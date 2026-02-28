@@ -218,31 +218,48 @@ CA_HOST=$(echo "$CA_URL" | sed -E 's|https?://||' | cut -d'/' -f1 | cut -d':' -f
 CA_PORT=$(echo "$CA_URL" | sed -E 's|https?://||' | cut -d':' -f2 | cut -d'/' -f1)
 [[ "$CA_PORT" == "$CA_HOST" ]] && CA_PORT="443"  # no port specified
 
+# Possible locations for the step-ca root certificate
+STEP_ROOT_PATHS=(
+  "/root/.step/certs/root_ca.crt"
+  "${HOME}/.step/certs/root_ca.crt"
+  "/etc/step/certs/root_ca.crt"
+  "/usr/local/share/ca-certificates/stepca-root.crt"
+  "/etc/pki/ca-trust/source/anchors/stepca-root.crt"
+)
+
+ssl_trusted() {
+  # Returns 0 if the CA URL is reachable with valid SSL via any known trust path
+  # 1. System trust store
+  if curl -fsS --max-time 5 "$CA_URL" -o /dev/null 2>/dev/null; then
+    return 0
+  fi
+  # 2. Known step root cert locations
+  for p in "${STEP_ROOT_PATHS[@]}"; do
+    if [[ -f "$p" ]]; then
+      if curl -fsS --max-time 5 --cacert "$p" "$CA_URL" -o /dev/null 2>/dev/null; then
+        return 0
+      fi
+    fi
+  done
+  return 1
+}
+
 info "Checking SSL validity for ${CA_HOST}:${CA_PORT}..."
 
-if curl -fsS --max-time 5 "$CA_URL" -o /dev/null 2>/dev/null; then
+if ssl_trusted; then
   success "SSL certificate is already trusted — no changes needed."
 else
-  warn "SSL certificate is not trusted (self-signed or private CA)."
-  info "Fetching certificate chain from ${CA_HOST}:${CA_PORT}..."
+  warn "SSL certificate is not trusted yet."
+  info "Fetching certificate from ${CA_HOST}:${CA_PORT} (bypassing verification)..."
 
-  # Grab the full certificate chain via openssl
   TEMP_CERT=$(mktemp /tmp/stepca-root-XXXXXX.crt)
-  if ! openssl s_client \
-        -connect "${CA_HOST}:${CA_PORT}" \
-        -showcerts \
-        -verify_quiet \
-        -verify_return_error 2>/dev/null < /dev/null \
-      | openssl x509 -outform PEM > "$TEMP_CERT" 2>/dev/null; then
-    # Fallback: grab without verification (untrusted cert)
-    openssl s_client \
-      -connect "${CA_HOST}:${CA_PORT}" \
-      -showcerts \
-      -verify_quiet 2>/dev/null < /dev/null \
-    | awk '/-----BEGIN CERTIFICATE-----/{p=1} p; /-----END CERTIFICATE-----/{p=0}' \
-    | awk 'BEGIN{n=0} /-----BEGIN CERTIFICATE-----/{n++} n==1' \
-    > "$TEMP_CERT" || true
-  fi
+
+  # Always use the insecure grab — we verify via fingerprint prompt, not SSL chain
+  openssl s_client \
+    -connect "${CA_HOST}:${CA_PORT}" \
+    -showcerts 2>/dev/null < /dev/null \
+  | awk '/-----BEGIN CERTIFICATE-----/{p=1} p; /-----END CERTIFICATE-----/{p=0; exit}' \
+  > "$TEMP_CERT" || true
 
   if [[ ! -s "$TEMP_CERT" ]]; then
     rm -f "$TEMP_CERT"
@@ -250,10 +267,10 @@ else
   fi
 
   CERT_SUBJECT=$(openssl x509 -noout -subject -in "$TEMP_CERT" 2>/dev/null || echo "unknown")
-  CERT_FINGERPRINT=$(openssl x509 -noout -fingerprint -sha256 -in "$TEMP_CERT" 2>/dev/null || echo "unknown")
+  CERT_SHA256=$(openssl x509 -noout -fingerprint -sha256 -in "$TEMP_CERT" 2>/dev/null | sed 's/.*=//' || echo "unknown")
   echo
-  info "Certificate subject:     $CERT_SUBJECT"
-  info "Certificate fingerprint: $CERT_FINGERPRINT"
+  info "Certificate subject:          $CERT_SUBJECT"
+  info "Certificate SHA-256 fingerprint: $CERT_SHA256"
   echo
 
   if ! ask_yn "Trust and install this certificate into the system store?"; then
@@ -263,28 +280,27 @@ else
 
   # Install into system trust store
   if command -v update-ca-certificates &>/dev/null; then
-    # Debian/Ubuntu
     cp "$TEMP_CERT" /usr/local/share/ca-certificates/stepca-root.crt
     update-ca-certificates -f &>/dev/null \
       && success "Certificate added to system trust store (Debian/Ubuntu)." \
       || error "update-ca-certificates failed."
   elif command -v update-ca-trust &>/dev/null; then
-    # RHEL/CentOS/Fedora
     cp "$TEMP_CERT" /etc/pki/ca-trust/source/anchors/stepca-root.crt
     update-ca-trust extract \
       && success "Certificate added to system trust store (RHEL/Fedora)." \
       || error "update-ca-trust failed."
   else
-    warn "Could not detect system trust store. Falling back to curl --cacert for validation only."
+    warn "Could not detect system trust store — certificate saved to /usr/local/share/ca-certificates/stepca-root.crt only."
+    cp "$TEMP_CERT" /usr/local/share/ca-certificates/stepca-root.crt
   fi
 
   rm -f "$TEMP_CERT"
 
-  # Verify it now works
-  if curl -fsS --max-time 5 "$CA_URL" -o /dev/null 2>/dev/null; then
-    success "SSL now trusted successfully."
+  # Re-check
+  if ssl_trusted; then
+    success "SSL is now trusted."
   else
-    warn "SSL still not trusted by curl — bootstrap may still work via step's own trust store."
+    warn "SSL still not trusted by curl — this is usually fine, step uses its own trust store after bootstrap."
   fi
 fi
 
@@ -355,11 +371,13 @@ else
   if ask_yn "Add it now?"; then
     echo "$CERT_LINE" >> "$SSHD_CONF"
     success "Added HostCertificate directive."
-    restart_ssh
   else
     warn "Skipped. Remember to add it manually before SSH host cert auth will work."
   fi
 fi
+
+# Always restart SSH to pick up the newly issued certificate
+restart_ssh
 
 echo
 
