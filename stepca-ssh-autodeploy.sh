@@ -182,9 +182,90 @@ fi
 
 echo
 
-# ─── Step 1: Bootstrap ───────────────────────────────────────────────────────
+# ─── Step 1a: SSL trust check ─────────────────────────────────────────────────
 
-echo -e "${CYAN}━━━ Step 1: Bootstrap ━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "${CYAN}━━━ Step 1: SSL Trust Check ━━━━━━━━━━━━━━━━━━━━${NC}"
+
+# Extract host and port from CA URL
+CA_HOST=$(echo "$CA_URL" | sed -E 's|https?://||' | cut -d'/' -f1 | cut -d':' -f1)
+CA_PORT=$(echo "$CA_URL" | sed -E 's|https?://||' | cut -d':' -f2 | cut -d'/' -f1)
+[[ "$CA_PORT" == "$CA_HOST" ]] && CA_PORT="443"  # no port specified
+
+info "Checking SSL validity for ${CA_HOST}:${CA_PORT}..."
+
+if curl -fsS --max-time 5 "$CA_URL" -o /dev/null 2>/dev/null; then
+  success "SSL certificate is already trusted — no changes needed."
+else
+  warn "SSL certificate is not trusted (self-signed or private CA)."
+  info "Fetching certificate chain from ${CA_HOST}:${CA_PORT}..."
+
+  # Grab the full certificate chain via openssl
+  TEMP_CERT=$(mktemp /tmp/stepca-root-XXXXXX.crt)
+  if ! openssl s_client \
+        -connect "${CA_HOST}:${CA_PORT}" \
+        -showcerts \
+        -verify_quiet \
+        -verify_return_error 2>/dev/null < /dev/null \
+      | openssl x509 -outform PEM > "$TEMP_CERT" 2>/dev/null; then
+    # Fallback: grab without verification (untrusted cert)
+    openssl s_client \
+      -connect "${CA_HOST}:${CA_PORT}" \
+      -showcerts \
+      -verify_quiet 2>/dev/null < /dev/null \
+    | awk '/-----BEGIN CERTIFICATE-----/{p=1} p; /-----END CERTIFICATE-----/{p=0}' \
+    | awk 'BEGIN{n=0} /-----BEGIN CERTIFICATE-----/{n++} n==1' \
+    > "$TEMP_CERT" || true
+  fi
+
+  if [[ ! -s "$TEMP_CERT" ]]; then
+    rm -f "$TEMP_CERT"
+    error "Could not retrieve certificate from ${CA_HOST}:${CA_PORT}."
+  fi
+
+  CERT_SUBJECT=$(openssl x509 -noout -subject -in "$TEMP_CERT" 2>/dev/null || echo "unknown")
+  CERT_FINGERPRINT=$(openssl x509 -noout -fingerprint -sha256 -in "$TEMP_CERT" 2>/dev/null || echo "unknown")
+  echo
+  info "Certificate subject:     $CERT_SUBJECT"
+  info "Certificate fingerprint: $CERT_FINGERPRINT"
+  echo
+
+  if ! ask_yn "Trust and install this certificate into the system store?"; then
+    rm -f "$TEMP_CERT"
+    error "Cannot continue without trusting the CA certificate."
+  fi
+
+  # Install into system trust store
+  if command -v update-ca-certificates &>/dev/null; then
+    # Debian/Ubuntu
+    cp "$TEMP_CERT" /usr/local/share/ca-certificates/stepca-root.crt
+    update-ca-certificates -f &>/dev/null \
+      && success "Certificate added to system trust store (Debian/Ubuntu)." \
+      || error "update-ca-certificates failed."
+  elif command -v update-ca-trust &>/dev/null; then
+    # RHEL/CentOS/Fedora
+    cp "$TEMP_CERT" /etc/pki/ca-trust/source/anchors/stepca-root.crt
+    update-ca-trust extract \
+      && success "Certificate added to system trust store (RHEL/Fedora)." \
+      || error "update-ca-trust failed."
+  else
+    warn "Could not detect system trust store. Falling back to curl --cacert for validation only."
+  fi
+
+  rm -f "$TEMP_CERT"
+
+  # Verify it now works
+  if curl -fsS --max-time 5 "$CA_URL" -o /dev/null 2>/dev/null; then
+    success "SSL now trusted successfully."
+  else
+    warn "SSL still not trusted by curl — bootstrap may still work via step's own trust store."
+  fi
+fi
+
+echo
+
+# ─── Step 1b: Bootstrap ──────────────────────────────────────────────────────
+
+echo -e "${CYAN}━━━ Step 2: Bootstrap ━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 if $ALREADY_BOOTSTRAPPED; then
   success "Already bootstrapped — skipping."
 else
@@ -198,7 +279,7 @@ echo
 
 # ─── Step 2: Issue host certificate ──────────────────────────────────────────
 
-echo -e "${CYAN}━━━ Step 2: Issue Host Certificate ━━━━━━━━━━━━━${NC}"
+echo -e "${CYAN}━━━ Step 3: Issue Host Certificate ━━━━━━━━━━━━━${NC}"
 
 CERT_CMD=(
   step ssh certificate --host
@@ -235,7 +316,7 @@ echo
 
 # ─── Step 3: sshd_config ─────────────────────────────────────────────────────
 
-echo -e "${CYAN}━━━ Step 3: Configure sshd ━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "${CYAN}━━━ Step 4: Configure sshd ━━━━━━━━━━━━━━━━━━━━━${NC}"
 
 SSHD_CONF="/etc/ssh/sshd_config"
 CERT_LINE="HostCertificate /etc/ssh/ssh_host_ecdsa_key-cert.pub"
@@ -258,7 +339,7 @@ echo
 
 # ─── Step 4: Cron auto-renewal ────────────────────────────────────────────────
 
-echo -e "${CYAN}━━━ Step 4: Auto-Renewal Cron Job ━━━━━━━━━━━━━━${NC}"
+echo -e "${CYAN}━━━ Step 5: Auto-Renewal Cron Job ━━━━━━━━━━━━━━${NC}"
 
 CRON_LINE="0 0 * * * step ssh renew --force /etc/ssh/ssh_host_ecdsa_key-cert.pub /etc/ssh/ssh_host_ecdsa_key && systemctl restart sshd"
 
